@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 
@@ -28,26 +28,26 @@ def list_query(status: str | None = None) -> BookStatus | None:
     return status  # type: ignore[return-value]
 
 
+Service = Annotated[BookService, Depends(get_service)]
+StatusFilter = Annotated[BookStatus | None, Depends(list_query)]
+
+
 # NOTE: /stats is registered before /{book_id} so "stats" is never treated as an id.
 @router.get("/stats")
-def book_stats(service: BookService = Depends(get_service)) -> dict[str, Any]:
+def book_stats(service: Service) -> dict[str, Any]:
     return {"data": service.stats()}
 
 
 @router.get("")
-def list_books(
-    status: BookStatus | None = Depends(list_query), service: BookService = Depends(get_service)
-) -> dict[str, Any]:
+def list_books(status: StatusFilter, service: Service) -> dict[str, Any]:
     return {"data": service.list(status)}
 
 
 @router.post("", status_code=201)
-def create_book(body: CreateBookIn, service: BookService = Depends(get_service)) -> dict[str, Any]:
+def create_book(body: CreateBookIn, service: Service) -> dict[str, Any]:
     return {"data": service.create(body)}
 
 
 @router.patch("/{book_id}")
-def update_book_status(
-    book_id: str, body: UpdateStatusIn, service: BookService = Depends(get_service)
-) -> dict[str, Any]:
+def update_book_status(book_id: str, body: UpdateStatusIn, service: Service) -> dict[str, Any]:
     return {"data": service.update_status(book_id, body.status)}

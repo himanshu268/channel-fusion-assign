@@ -90,7 +90,7 @@ def create_app(
 
     register_error_handlers(app)
 
-    @app.get(f"{API_PREFIX}/health", tags=["health"])
+    @app.api_route(f"{API_PREFIX}/health", methods=["GET", "HEAD"], tags=["health"])
     def health() -> dict[str, Any]:
         return {"data": {"status": "ok"}}
 

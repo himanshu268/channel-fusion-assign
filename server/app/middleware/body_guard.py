@@ -31,9 +31,9 @@ class BodyGuardMiddleware:
         if has_body:
             media_type = headers.get("content-type", "").split(";")[0].strip().lower()
             if media_type != "application/json":
-                await error_response(
-                    415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json"
-                )(scope, receive, send)
+                await error_response(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json")(
+                    scope, receive, send
+                )
                 return
 
         if content_length is not None:
@@ -73,6 +73,6 @@ class BodyGuardMiddleware:
         await self.app(scope, replay, send)
 
     async def _too_large(self, scope: Scope, receive: Receive, send: Send) -> None:
-        await error_response(
-            413, "PAYLOAD_TOO_LARGE", f"Request body must be at most {self.limit} bytes"
-        )(scope, receive, send)
+        await error_response(413, "PAYLOAD_TOO_LARGE", f"Request body must be at most {self.limit} bytes")(
+            scope, receive, send
+        )

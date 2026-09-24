@@ -68,9 +68,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.disabled = settings.RATE_LIMIT_DISABLED
         self.trust_proxy = settings.TRUST_PROXY
         self.global_limiter = FixedWindowLimiter(settings.RATE_LIMIT_MAX, settings.RATE_LIMIT_WINDOW_MS)
-        self.write_limiter = FixedWindowLimiter(
-            settings.WRITE_RATE_LIMIT_MAX, settings.WRITE_RATE_LIMIT_WINDOW_MS
-        )
+        self.write_limiter = FixedWindowLimiter(settings.WRITE_RATE_LIMIT_MAX, settings.WRITE_RATE_LIMIT_WINDOW_MS)
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         ip = client_ip(request, self.trust_proxy)

@@ -120,7 +120,5 @@ def test_create_rejects_non_json_content_type(client: TestClient) -> None:
 
 
 def test_create_accepts_json_with_charset(client: TestClient) -> None:
-    res = client.post(
-        URL, content=b'{"title":"Dune"}', headers={"Content-Type": "application/json; charset=utf-8"}
-    )
+    res = client.post(URL, content=b'{"title":"Dune"}', headers={"Content-Type": "application/json; charset=utf-8"})
     assert res.status_code == 201

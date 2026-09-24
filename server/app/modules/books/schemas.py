@@ -42,7 +42,7 @@ class CreateBookIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # default None + validate_default so a missing title hits our validator and custom message
-    title: str = Field(default=None, validate_default=True)  # type: ignore[assignment]
+    title: str = Field(default=None, validate_default=True)
     author: str = ""
     status: BookStatus = "to-read"
 
@@ -53,12 +53,12 @@ class CreateBookIn(BaseModel):
             raise PydanticCustomError("title_required", "Title is required")
         if not isinstance(v, str):
             raise PydanticCustomError("title_type", "Title must be a string")
-        v = _clean(v)
-        if not v:
+        title = _clean(v)
+        if not title:
             raise PydanticCustomError("title_required", "Title is required")
-        if len(v) > MAX_LEN:
+        if len(title) > MAX_LEN:
             raise PydanticCustomError("title_length", f"Title must be at most {MAX_LEN} characters")
-        return v
+        return title
 
     @field_validator("author", mode="before")
     @classmethod
@@ -67,10 +67,10 @@ class CreateBookIn(BaseModel):
             return ""
         if not isinstance(v, str):
             raise PydanticCustomError("author_type", "Author must be a string")
-        v = _clean(v)
-        if len(v) > MAX_LEN:
+        author = _clean(v)
+        if len(author) > MAX_LEN:
             raise PydanticCustomError("author_length", f"Author must be at most {MAX_LEN} characters")
-        return v
+        return author
 
     @field_validator("status", mode="before")
     @classmethod
@@ -81,7 +81,7 @@ class CreateBookIn(BaseModel):
 class UpdateStatusIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: BookStatus = Field(default=None, validate_default=True)  # type: ignore[assignment]
+    status: BookStatus = Field(default=None, validate_default=True)
 
     @field_validator("status", mode="before")
     @classmethod

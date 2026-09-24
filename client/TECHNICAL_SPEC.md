@@ -41,7 +41,7 @@
 | Frontend dev port | `5173` (Vite) |
 | API prefix | `/api/v1` |
 | Dev CORS | Vite proxies `/api/*` → `http://localhost:4000`; browser sees same-origin, no CORS in dev |
-| Prod CORS | Backend allowlist from env `CORS_ORIGIN` (comma-separated). Methods `GET,POST,PATCH`. Headers `Content-Type`. No credentials |
+| Prod CORS | Backend allowlist from env `CORS_ORIGIN` (comma-separated). Methods `GET,POST,PATCH`. Allowed request headers `Content-Type`, `X-Request-Id`. Exposed response headers `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `Retry-After`, `X-Request-Id`. No credentials |
 | Content type | Requests with a body MUST send `Content-Type: application/json`, else `415` |
 | Request ID | Backend sets/echoes `X-Request-Id` on every response; frontend may send one |
 
@@ -109,7 +109,7 @@ Validation rules (identical client + server):
 | Global | all `/api/*`, per IP | 100 req / 15 min | `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX` |
 | Write | `POST`, `PATCH` under `/api/*`, per IP | 20 req / 1 min | `WRITE_RATE_LIMIT_WINDOW_MS`, `WRITE_RATE_LIMIT_MAX` |
 
-On every response: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (draft-7 standard headers).
+On every response: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (IETF RateLimit header fields, draft-06 naming; `RateLimit-Reset` = seconds until window resets).
 On `429`: additionally `Retry-After: <seconds>` and body `{ error: { code: "RATE_LIMITED", message: "Too many requests, try again in N seconds" } }`.
 Frontend MUST honour `Retry-After` (disable the action, show countdown).
 
@@ -376,7 +376,7 @@ Optional e2e (Playwright / `agent-browser`) against real backend: add → filter
 7. `StatsBar`, `AddBookForm`, `StatusFilter`, `BookList`, `BookRow`, `RateLimitNotice`; compose in `App.tsx`; `styles.css`.
 8. `tests/mocks/handlers.ts` + `server.ts` + `setup.ts`; write the five test files.
 9. `npm run lint && npm run typecheck && npm test && npm run build`.
-10. Integration run: start backend (`cd ../server && npm run dev`), start `npm run dev`, walk §9 checklist.
+10. Integration run: start backend (`cd ../server && uv run python -m app`), start `npm run dev`, walk §9 checklist.
 
 ---
 

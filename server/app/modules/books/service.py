@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from app.core.errors import HttpError
 
 from .repository import BookRepository
-from .schemas import BOOK_STATUSES, Book, BookStats, BookStatus, CreateBookIn
+from .schemas import Book, BookStats, BookStatus, CreateBookIn
 
 Clock = Callable[[], datetime]
 
@@ -57,8 +57,9 @@ class BookService:
 
     def stats(self) -> BookStats:
         counts = self._repo.count_by_status()
-        stats: BookStats = {"to-read": 0, "reading": 0, "done": 0, "total": 0}
-        for s in BOOK_STATUSES:
-            stats[s] = counts.get(s, 0)  # type: ignore[literal-required]
-        stats["total"] = sum(counts.values())
-        return stats
+        return {
+            "to-read": counts.get("to-read", 0),
+            "reading": counts.get("reading", 0),
+            "done": counts.get("done", 0),
+            "total": sum(counts.values()),
+        }

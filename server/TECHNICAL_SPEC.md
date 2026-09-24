@@ -1,4 +1,4 @@
-# Books API — Backend Technical Specification
+# Books API — Backend Technical Specification (Python / FastAPI)
 
 > Scope: backend only. The frontend has its own spec at `client/TECHNICAL_SPEC.md`.
 > Section 2 ("Integration Contract") is duplicated verbatim in both specs. If you change it here, change it there too.
@@ -18,19 +18,21 @@
 
 | Concern | Choice | Why |
 |---|---|---|
-| Runtime | Node 20 LTS | Stable, native `fetch`, wide support |
-| Framework | Express 5 | Async error propagation built in, huge middleware ecosystem |
-| Language | TypeScript (strict) | Type safety on contract types shared with frontend |
-| Validation | Zod | Single schema → runtime validation + inferred TS types |
-| DB | SQLite via `better-sqlite3` | Zero infra, synchronous API, `:memory:` for tests. Repository interface keeps Postgres swap trivial |
-| Security headers | `helmet` | Sane defaults for A05 |
-| CORS | `cors` with explicit allowlist | A01/A05 |
-| Rate limiting | `express-rate-limit` v7 | Standard `RateLimit-*` headers, memory store OK for single instance |
-| Logging | `pino` + `pino-http` | Structured JSON logs, request IDs (A09) |
-| Tests | Vitest + Supertest | Fast, TS native, in-process app (no port binding) |
-| Dev runner | `tsx` | No build step during dev |
+| Runtime | Python 3.12 | Current stable, modern typing (`X \| None`, `Annotated`) |
+| Framework | FastAPI (Starlette 1.x) | Pydantic-native validation, dependency injection, async-capable, auto OpenAPI in dev |
+| Package / env | `uv` + `pyproject.toml` + `uv.lock` | Fast, reproducible installs with a committed lockfile (A06/A08) |
+| Validation | Pydantic v2 | One model gives runtime validation, custom messages, `extra="forbid"` |
+| Config | `pydantic-settings` | Typed env parsing; invalid env fails fast at startup |
+| DB | SQLite via stdlib `sqlite3` | Zero infra, `:memory:` for tests. Repository `Protocol` keeps a Postgres swap trivial |
+| Security headers | Custom `CoreMiddleware` | Helmet-equivalent header set, tuned for a JSON-only API |
+| CORS | Starlette `CORSMiddleware`, explicit allowlist | A01/A05 |
+| Rate limiting | Custom in-memory fixed-window limiter | Exact contract headers (`RateLimit-*`, `Retry-After`), no extra deps, Redis-swappable |
+| Logging | stdlib `logging` + JSON formatter | Structured logs with request id (A09), no extra deps |
+| Server | `uvicorn` | `server_header=False` hides the server banner, like disabling `x-powered-by` |
+| Tests | pytest + FastAPI `TestClient` (`httpx2`) | In-process app, no port binding |
+| Quality | ruff (incl. bandit `S` rules), mypy `--strict` + pydantic plugin, pip-audit | Lint, types, dependency CVEs |
 
-**Explicit non-goals:** authentication/authorization (no users in scope — documented under A01/A07), pagination, soft delete, DELETE endpoint.
+**Explicit non-goals:** authentication/authorization (no users in scope, see A01/A07), pagination, soft delete, DELETE endpoint.
 
 ---
 
@@ -44,7 +46,7 @@
 | Frontend dev port | `5173` (Vite) |
 | API prefix | `/api/v1` |
 | Dev CORS | Vite proxies `/api/*` → `http://localhost:4000`; browser sees same-origin, no CORS in dev |
-| Prod CORS | Backend allowlist from env `CORS_ORIGIN` (comma-separated). Methods `GET,POST,PATCH`. Headers `Content-Type`. No credentials |
+| Prod CORS | Backend allowlist from env `CORS_ORIGIN` (comma-separated). Methods `GET,POST,PATCH`. Allowed request headers `Content-Type`, `X-Request-Id`. Exposed response headers `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `Retry-After`, `X-Request-Id`. No credentials |
 | Content type | Requests with a body MUST send `Content-Type: application/json`, else `415` |
 | Request ID | Backend sets/echoes `X-Request-Id` on every response; frontend may send one |
 
@@ -112,7 +114,7 @@ Validation rules (identical client + server):
 | Global | all `/api/*`, per IP | 100 req / 15 min | `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX` |
 | Write | `POST`, `PATCH` under `/api/*`, per IP | 20 req / 1 min | `WRITE_RATE_LIMIT_WINDOW_MS`, `WRITE_RATE_LIMIT_MAX` |
 
-On every response: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (draft-7 standard headers).
+On every response: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (IETF RateLimit header fields, draft-06 naming; `RateLimit-Reset` = seconds until window resets).
 On `429`: additionally `Retry-After: <seconds>` and body `{ error: { code: "RATE_LIMITED", message: "Too many requests, try again in N seconds" } }`.
 Frontend MUST honour `Retry-After` (disable the action, show countdown).
 
@@ -151,76 +153,65 @@ HTTP/1.1 200 OK
 
 ```
 server/
-├── package.json
-├── tsconfig.json
-├── vitest.config.ts
+├── pyproject.toml             # deps, ruff, mypy, pytest config
+├── uv.lock                    # committed lockfile
 ├── .env.example
-├── .gitignore                 # node_modules, dist, data/, .env
-├── data/                      # SQLite file lives here (gitignored)
-├── src/
-│   ├── index.ts               # bootstrap only: loadEnv → openDb → migrate → createApp → listen
-│   ├── app.ts                 # createApp(deps): wires middleware + routes, NO listen (testable)
-│   ├── config/
-│   │   └── env.ts             # Zod-validated process.env → typed Config
+├── README.md
+├── data/                      # SQLite file (gitignored)
+├── app/
+│   ├── __main__.py            # `python -m app`: Settings() → create_app → uvicorn.run
+│   ├── main.py                # create_app(settings, conn, clock): error handlers, routes, middleware. No listen
+│   ├── core/
+│   │   ├── config.py          # Settings (pydantic-settings), body_limit_bytes, cors_origins
+│   │   ├── errors.py          # HttpError, error_body(), error_response() envelope helpers
+│   │   └── logging.py         # JSON formatter, configure_logging(), `books` logger
 │   ├── db/
-│   │   ├── connection.ts      # openDb(path | ':memory:') with WAL + foreign_keys pragmas
-│   │   └── migrate.ts         # idempotent CREATE TABLE IF NOT EXISTS + indexes
-│   ├── lib/
-│   │   ├── httpError.ts       # class HttpError(status, code, message, details?)
-│   │   └── logger.ts          # pino instance, redact config
+│   │   ├── connection.py      # open_db(path | ':memory:'), WAL + foreign_keys pragmas
+│   │   └── migrate.py         # idempotent CREATE TABLE IF NOT EXISTS + indexes
 │   ├── middleware/
-│   │   ├── requestId.ts       # X-Request-Id passthrough or randomUUID()
-│   │   ├── requireJson.ts     # 415 if body present and content-type != application/json
-│   │   ├── validate.ts        # validate({ body?, query?, params? }) → 400 VALIDATION_ERROR
-│   │   ├── rateLimit.ts       # globalLimiter, writeLimiter factories (env-driven, disable flag)
-│   │   ├── notFound.ts        # 404 NOT_FOUND for unmatched routes
-│   │   └── errorHandler.ts    # HttpError → envelope; unknown → 500, log, no stack in prod
+│   │   ├── core.py            # request id, security headers, Cache-Control, 500 boundary, access log
+│   │   ├── rate_limit.py      # FixedWindowLimiter, client_ip(), RateLimitMiddleware (global + write)
+│   │   └── body_guard.py      # pure ASGI: 415 non-JSON body, 413 oversized body (incl. chunked)
 │   └── modules/books/
-│       ├── book.schema.ts     # BookStatus enum, createBookSchema, updateStatusSchema, listQuerySchema, idParamSchema
-│       ├── book.types.ts      # Book, BookStats (inferred from schema / explicit)
-│       ├── book.repository.ts # interface BookRepository + SqliteBookRepository (parameterized SQL)
-│       ├── book.service.ts    # create, list(filter), updateStatus, stats — throws HttpError(404)
-│       ├── book.controller.ts # thin: parse → service → res.status().json({ data })
-│       └── book.routes.ts     # Router with validate() + writeLimiter on POST/PATCH
+│       ├── schemas.py         # BookStatus, Book, BookStats, CreateBookIn, UpdateStatusIn
+│       ├── repository.py      # BookRepository Protocol + SqliteBookRepository (parameterised SQL)
+│       ├── service.py         # BookService: create, list(status), update_status, stats. Injectable clock
+│       └── router.py          # APIRouter, list_query() dependency, Annotated deps
 └── tests/
-    ├── helpers/
-    │   └── testApp.ts         # createApp({ db: openDb(':memory:'), rateLimit: { disabled: true } })
-    ├── books.create.test.ts
-    ├── books.list.test.ts     # ← contains the scripted red→green test
-    ├── books.stats.test.ts
-    ├── books.update.test.ts
-    └── security.test.ts       # helmet headers, 415, 413, 429, 404 envelope, no stack leak
+    ├── conftest.py            # make_client(**settings), FakeClock, client / add_book fixtures
+    ├── test_books_create.py
+    ├── test_books_list.py     # contains the scripted red → green test
+    ├── test_books_stats.py
+    ├── test_books_update.py
+    └── test_security.py       # headers, CORS, 404/413/415/500 envelopes, rate limits, docs off in prod
 ```
 
 ### 3.1 Dependencies
 
 ```bash
-npm i express@5 zod better-sqlite3 helmet cors express-rate-limit pino pino-http dotenv
-npm i -D typescript tsx vitest supertest @types/express @types/supertest @types/better-sqlite3 @types/cors @types/node
+uv venv --python 3.12
+uv add fastapi "uvicorn[standard]" pydantic pydantic-settings
+uv add --dev pytest httpx2 mypy ruff pip-audit
 ```
 
-### 3.2 Scripts (`package.json`)
+### 3.2 Commands
 
-```json
-{
-  "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "audit": "npm audit --audit-level=high"
-  }
-}
-```
+| Task | Command |
+|---|---|
+| Install | `uv sync` |
+| Run | `uv run python -m app` (reads `.env`, port `4000`) |
+| Dev with reload | `uv run uvicorn app.main:create_app --factory --reload --port 4000` |
+| Test | `uv run pytest` |
+| Lint / format | `uv run ruff check .` · `uv run ruff format .` |
+| Typecheck | `uv run mypy` |
+| Audit | `uv run pip-audit` |
 
 ### 3.3 Environment (`.env.example`)
 
 ```env
-NODE_ENV=development
+APP_ENV=development          # development | test | production (production disables /docs and /openapi.json)
 PORT=4000
-LOG_LEVEL=info
+LOG_LEVEL=info               # debug | info | warning | error
 DB_PATH=./data/books.db
 CORS_ORIGIN=http://localhost:5173
 TRUST_PROXY=false
@@ -229,10 +220,10 @@ RATE_LIMIT_MAX=100
 WRITE_RATE_LIMIT_WINDOW_MS=60000
 WRITE_RATE_LIMIT_MAX=20
 RATE_LIMIT_DISABLED=false
-JSON_BODY_LIMIT=10kb
+JSON_BODY_LIMIT=10kb         # 2048 | 10kb | 1mb
 ```
 
-`config/env.ts` parses this with Zod and **fails fast** on startup if invalid.
+`core/config.py` parses this with pydantic-settings and **fails fast** on startup if a value is invalid.
 
 ---
 
@@ -251,58 +242,57 @@ CREATE INDEX IF NOT EXISTS idx_books_status ON books(status);
 CREATE INDEX IF NOT EXISTS idx_books_created_at ON books(created_at DESC);
 ```
 
-- DB-level `CHECK` constraints are defence in depth behind Zod.
-- Pragmas: `journal_mode = WAL`, `foreign_keys = ON`.
-- Repository maps `snake_case` columns → `camelCase` `Book`.
-- Stats query: `SELECT status, COUNT(*) AS n FROM books GROUP BY status`, then fill missing statuses with `0` in the service so the shape is always complete.
+- DB-level `CHECK` constraints are defence in depth behind Pydantic.
+- One shared connection (`check_same_thread=False`, autocommit). The repository serialises access with a `threading.Lock`, because FastAPI runs sync endpoints in a threadpool.
+- The list query orders by `created_at DESC, rowid DESC`, so rows created in the same millisecond stay in a stable order.
+- Stats query: `SELECT status, COUNT(*) AS n FROM books GROUP BY status`. The service fills missing statuses with `0`, so the shape is always complete.
+- Timestamps come from an injectable clock and are formatted as ISO 8601 UTC with milliseconds and `Z`. Tests use a fake clock.
 
-Repository interface:
-
-```ts
-export interface BookRepository {
-  insert(book: Book): Book;
-  findAll(filter?: { status?: BookStatus }): Book[];
-  findById(id: string): Book | undefined;
-  updateStatus(id: string, status: BookStatus, updatedAt: string): Book | undefined;
-  countByStatus(): Partial<Record<BookStatus, number>>;
-}
+```python
+class BookRepository(Protocol):
+    def insert(self, book: Book) -> Book: ...
+    def find_all(self, status: BookStatus | None = None) -> list[Book]: ...
+    def find_by_id(self, book_id: str) -> Book | None: ...
+    def update_status(self, book_id: str, status: BookStatus, updated_at: str) -> Book | None: ...
+    def count_by_status(self) -> dict[BookStatus, int]: ...
 ```
 
-All SQL uses `?` placeholders via prepared statements. **Never** interpolate values into SQL strings.
+All SQL uses `?` placeholders. **Never** interpolate values into SQL strings.
 
 ---
 
-## 5. Request pipeline (order matters)
+## 5. Request pipeline (outer → inner)
 
 ```
-requestId
-→ pino-http (logs method, url, status, duration, requestId; redacts nothing sensitive because none exists)
-→ helmet()
-→ cors(allowlist)
-→ globalLimiter                      (all /api/*)
-→ express.json({ limit: JSON_BODY_LIMIT, strict: true })
-→ requireJson                        (415 on wrong content-type when body present)
-→ /api/v1/health
-→ /api/v1/books router
-     GET  /            validate({ query: listQuerySchema })
-     GET  /stats
-     POST /            writeLimiter, validate({ body: createBookSchema })
-     PATCH /:id        writeLimiter, validate({ params: idParamSchema, body: updateStatusSchema })
-→ notFound (404)
-→ errorHandler
+CoreMiddleware        request id (validated), try/except → 500 envelope, security headers, access log
+→ CORSMiddleware      allowlist, GET/POST/PATCH, exposes RateLimit-*/Retry-After/X-Request-Id
+→ RateLimitMiddleware /api/* only, skips OPTIONS. Global limiter, then write limiter for POST/PATCH
+→ BodyGuardMiddleware 415 if a body is present and not application/json. 413 if > JSON_BODY_LIMIT
+→ routes
+     GET   /api/v1/health          (GET + HEAD)
+     GET   /api/v1/books/stats     registered before /{book_id}
+     GET   /api/v1/books           list_query() dependency validates ?status=
+     POST  /api/v1/books           body: CreateBookIn
+     PATCH /api/v1/books/{book_id} body: UpdateStatusIn. Non-UUID id → 404
 ```
 
-Route ordering note: register `GET /stats` **before** `PATCH /:id`/any `/:id` route so `stats` is never treated as an id.
+Starlette's `add_middleware` makes the last-added middleware the outermost, so `create_app` adds them in reverse order. `CoreMiddleware` is outermost, so every response gets security headers and a request id, including 429, 413, 415 and 500.
 
-### 5.1 Error handler behaviour
+### 5.1 Error mapping
 
 | Incoming | Response |
 |---|---|
 | `HttpError` | its status + `{ error: { code, message, details? } }` |
-| Zod error (from `validate`) | `400 VALIDATION_ERROR` with flattened `details` |
-| `entity.too.large` (body-parser) | `413 PAYLOAD_TOO_LARGE` |
-| `entity.parse.failed` (bad JSON) | `400 VALIDATION_ERROR`, message "Malformed JSON" |
-| anything else | `500 INTERNAL_ERROR`, generic message; full error logged with requestId. **Never** send `err.stack` or `err.message` to the client |
+| `RequestValidationError` | `400 VALIDATION_ERROR`, message `Invalid request body`, `details[{path, message}]` |
+| … with `json_invalid` | message `Malformed JSON` |
+| … with `extra_forbidden` | detail message `Unknown field` |
+| … body missing / not an object | detail message `Request body is required` / `Request body must be a JSON object` |
+| Invalid `?status=` | `400 VALIDATION_ERROR`, message `Invalid query parameters` |
+| Starlette 404 / 405 | `404 NOT_FOUND`, message `Route not found` (never HTML) |
+| Oversized body | `413 PAYLOAD_TOO_LARGE` (from BodyGuard) |
+| Any other exception | `500 INTERNAL_ERROR`, `Something went wrong`. Traceback logged server-side with request id, never sent |
+
+Custom field messages (`Title is required`, `Status must be one of: to-read, reading, done`, and others) are raised with `PydanticCustomError` in `mode="before"` validators. Required fields use `default=None, validate_default=True`, so a missing field reaches the custom message too.
 
 ---
 
@@ -310,139 +300,116 @@ Route ordering note: register `GET /stats` **before** `PATCH /:id`/any `/:id` ro
 
 | # | Risk | Mitigation in this service | Where |
 |---|---|---|---|
-| A01 | Broken Access Control | No auth in scope (single-user assignment) — documented. CORS allowlist, only `GET/POST/PATCH` exposed, no `DELETE`, no wildcard routes. `TRUST_PROXY` off by default so `req.ip` cannot be spoofed via `X-Forwarded-For`. | `app.ts`, `env.ts` |
-| A02 | Cryptographic Failures | No secrets/PII stored. HSTS via helmet (effective when served over TLS). `.env` gitignored. TLS terminated at reverse proxy in prod. | `helmet`, `.gitignore` |
-| A03 | Injection | All input validated with Zod (types, lengths, enum). Parameterized SQL only. `express.json({ strict: true })` rejects non-object JSON. Responses are JSON — no HTML templating, no reflection of raw input in error messages. | `book.schema.ts`, `book.repository.ts` |
-| A04 | Insecure Design | Rate limiting (global + stricter write). Body size cap `10kb`. Server-generated UUIDs (client cannot choose ids). Enum allowlist for status. Fail-fast config validation. | `rateLimit.ts`, `app.ts` |
-| A05 | Security Misconfiguration | `helmet()` (CSP, X-Content-Type-Options, frame-ancestors, referrer policy, HSTS). `x-powered-by` disabled. Stack traces never returned. Explicit CORS methods/headers. Unknown routes → JSON 404, not Express HTML. | `app.ts`, `errorHandler.ts` |
-| A06 | Vulnerable & Outdated Components | `package-lock.json` committed. `npm audit --audit-level=high` script; run in CI. Pin major versions. Minimal dependency surface. | `package.json` |
-| A07 | Identification & Auth Failures | N/A — no accounts. Documented as out of scope; extension point: auth middleware slot before `/api/v1/books` router. | this doc |
-| A08 | Software & Data Integrity | Lockfile + `npm ci` in CI. No `eval`, no dynamic `require`. DB `CHECK` constraints enforce integrity independent of app code. | `migrate.ts` |
-| A09 | Security Logging & Monitoring | `pino-http` structured logs with `requestId`, status, latency. Explicitly log at `warn` on `429` and on `400` validation failures (counts abuse attempts). `500`s logged at `error` with stack (server side only). | `logger.ts`, `errorHandler.ts` |
-| A10 | SSRF | Service makes **no outbound HTTP requests**. No URL fields accepted. | by design |
+| A01 | Broken Access Control | No auth in scope (single-user assignment), documented. CORS allowlist. Only `GET/POST/PATCH` exposed, others → 404. `TRUST_PROXY` off by default, so `X-Forwarded-For` cannot spoof the client IP. | `main.py`, `rate_limit.py` |
+| A02 | Cryptographic Failures | No secrets or PII stored. HSTS header (effective over TLS). `.env` gitignored. TLS terminated at a reverse proxy in prod. | `core.py`, `.gitignore` |
+| A03 | Injection | Pydantic validation (types, lengths, enum). Parameterised SQL only. Control characters stripped. JSON-only responses, no templating. Tested with SQL-injection strings in body, query and path. | `schemas.py`, `repository.py` |
+| A04 | Insecure Design | Global + stricter write rate limits. Body cap `10kb`, enforced for chunked bodies too. Server-generated UUIDs. Enum allowlist. Fail-fast config. | `rate_limit.py`, `body_guard.py` |
+| A05 | Security Misconfiguration | Helmet-equivalent headers: CSP `default-src 'none'`, `nosniff`, `X-Frame-Options DENY`, `Referrer-Policy no-referrer`, HSTS, COOP/CORP. No `server` banner. `/docs` and `/openapi.json` disabled in production. JSON 404/405. No stack traces. | `core.py`, `main.py`, `__main__.py` |
+| A06 | Vulnerable & Outdated Components | `uv.lock` committed. `uv run pip-audit` (clean at time of writing). Minimal dependency set. | `pyproject.toml` |
+| A07 | Identification & Auth Failures | N/A, no accounts. Extension point: add a router-level `Depends(auth)` on the books router. | this doc |
+| A08 | Software & Data Integrity | Lockfile + `uv sync --frozen` in CI. No `eval`/`exec`/`pickle`. `extra="forbid"` blocks mass assignment. DB `CHECK` constraints. | `schemas.py`, `migrate.py` |
+| A09 | Security Logging & Monitoring | One JSON log line per request with `request_id`, method, path, status, latency, ip. `400/413/415/429` at `warning`, `500` at `error` with traceback. Incoming `X-Request-Id` accepted only if it matches `^[A-Za-z0-9._-]{1,64}$`, which blocks log injection. | `core.py`, `logging.py` |
+| A10 | SSRF | The service makes **no outbound HTTP requests** and accepts no URL fields. | by design |
 
-Additional hardening:
-- `express.json` `strict: true` + `type: 'application/json'`.
-- Zod `.strict()` on body schemas → unknown fields rejected (mass-assignment protection).
-- `title`/`author` trimmed; control characters stripped (`/[\u0000-\u001F\u007F]/g`).
-- `Cache-Control: no-store` on all `/api` responses.
+Additional hardening: `Cache-Control: no-store` on all responses. ruff `S` (bandit) rules run in lint.
 
 ---
 
 ## 7. Rate limiting — implementation detail
 
-```ts
-// middleware/rateLimit.ts
-import rateLimit from 'express-rate-limit';
-
-export function makeLimiters(cfg: Config) {
-  const passthrough = (_req, _res, next) => next();
-  if (cfg.RATE_LIMIT_DISABLED) return { globalLimiter: passthrough, writeLimiter: passthrough };
-
-  const handler = (req, res, _next, options) => {
-    const retryAfter = Math.ceil(options.windowMs / 1000);
-    req.log?.warn({ ip: req.ip, path: req.path }, 'rate limited');
-    res.setHeader('Retry-After', String(retryAfter));
-    res.status(429).json({ error: { code: 'RATE_LIMITED', message: `Too many requests, try again in ${retryAfter} seconds` } });
-  };
-
-  const globalLimiter = rateLimit({
-    windowMs: cfg.RATE_LIMIT_WINDOW_MS, limit: cfg.RATE_LIMIT_MAX,
-    standardHeaders: 'draft-7', legacyHeaders: false, handler,
-  });
-  const writeLimiter = rateLimit({
-    windowMs: cfg.WRITE_RATE_LIMIT_WINDOW_MS, limit: cfg.WRITE_RATE_LIMIT_MAX,
-    standardHeaders: 'draft-7', legacyHeaders: false, handler,
-    skip: (req) => !['POST', 'PATCH'].includes(req.method),
-  });
-  return { globalLimiter, writeLimiter };
-}
-```
-
-- Memory store is fine for one process. For multi-instance, swap in `rate-limit-redis` — interface unchanged.
-- `app.set('trust proxy', cfg.TRUST_PROXY)` — set `true`/hop count only behind a known proxy, otherwise limits are trivially bypassed.
-- Tests: default helper disables limiters; `security.test.ts` builds an app with `RATE_LIMIT_MAX=3` to assert the 4th request → `429` + `Retry-After`.
+- `FixedWindowLimiter(limit, window_ms, now=time.monotonic)` keeps `key → (window_start, count)` under a lock. `hit(key)` returns `allowed`, `limit`, `remaining` and `reset_seconds`. Expired windows are pruned once the map passes 10k keys.
+- `RateLimitMiddleware` applies to paths under `/api` and skips `OPTIONS` preflights. The global limiter runs first. For `POST`/`PATCH`, the write limiter runs next, and its headers win.
+- Allowed responses get `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. Blocked requests get `429`, the same headers plus `Retry-After`, and the `RATE_LIMITED` envelope. Both `Retry-After` and the message use the real seconds left in the window.
+- Client IP is `request.client.host`. With `TRUST_PROXY=true`, it is the **last** `X-Forwarded-For` entry, the one appended by our own single proxy.
+- For multiple instances, replace `FixedWindowLimiter` with a Redis-backed class with the same `hit()` signature.
+- Tests: the default test client sets `RATE_LIMIT_DISABLED=true`. `test_security.py` builds clients with small limits to assert the 429 path, write-vs-read separation, spoofing resistance, and window reset (fake clock).
 
 ---
 
 ## 8. Testing plan
 
-Test app: `createApp({ db: openDb(':memory:'), config: { ...testConfig, RATE_LIMIT_DISABLED: true } })`, fresh per test file (`beforeEach` re-migrates or reopens `:memory:`). Supertest hits the app in-process — no port.
+`make_client(**overrides)` builds `create_app(Settings(APP_ENV="test", RATE_LIMIT_DISABLED=True, ...), open_db(":memory:"), FakeClock())` for each test. `FakeClock` advances 1s per call, so `updatedAt > createdAt` is deterministic.
 
 | File | Cases |
 |---|---|
-| `books.create.test.ts` | 201 + full Book shape, defaults `status=to-read`, `author=''`; 400 missing title; 400 whitespace title; 400 title > 200; 400 invalid status; 400 unknown field; 400 malformed JSON; 415 wrong content-type |
-| `books.list.test.ts` | 200 empty array; returns all sorted `createdAt DESC`; **filter by each status returns only matching**; 400 on invalid `status` query |
-| `books.stats.test.ts` | all zeros when empty; correct counts + `total`; keys always present |
-| `books.update.test.ts` | 200 updates status + bumps `updatedAt`; 404 unknown uuid; 404 malformed id; 400 invalid status; 400 missing status |
-| `security.test.ts` | `x-powered-by` absent; `x-content-type-options: nosniff`; 404 envelope for unknown route; 413 on >10kb body; 429 after limit with `Retry-After` and `RateLimit-*` headers; 500 body has no `stack` |
+| `test_books_create.py` | 201 + full Book shape (UUID v4, ISO timestamps); defaults `to-read` / `''`; trimming and control-char strip; persisted; title missing / empty / whitespace / null → `Title is required`; > 200; non-string; author > 200; invalid status variants; multiple errors at once; unknown fields rejected; malformed JSON; non-object JSON; 415; `charset` accepted |
+| `test_books_list.py` | empty; newest first; **filter by status (red → green)**; each status; no matches; invalid `?status=` (incl. SQL-ish) → 400; unknown query params ignored |
+| `test_books_stats.py` | all zeros; correct counts + total; keys always present; reflects status change |
+| `test_books_update.py` | status change + `updatedAt` bump, other fields unchanged; 404 unknown UUID; 404 malformed ids; invalid status; missing status; extra fields; no body |
+| `test_security.py` | security headers (incl. on errors), no `server` banner, HEAD health, request id generate / echo / sanitise, JSON 404 for unknown route and method, 413 (plain + chunked), SQL injection stored as text, 500 hides details, CORS allow / deny / exposed headers, docs off in prod, global + write rate limits, XFF ignored, window reset |
 
-### 8.1 Scripted red → green (for the on-screen requirement)
+Current result: **64 passed**.
 
-Do this **live**, in this order:
+### 8.1 Scripted red → green (done, visible in git history)
 
-1. Implement `POST /books` and `GET /books` **without** reading `req.query.status` (list returns everything). Commit: `feat(books): create + list`.
-2. Write the test in `books.list.test.ts`:
-   ```ts
-   it('GET /books?status=reading returns only reading books', async () => {
-     await api.post('/api/v1/books').send({ title: 'A', status: 'reading' });
-     await api.post('/api/v1/books').send({ title: 'B', status: 'done' });
-     await api.post('/api/v1/books').send({ title: 'C', status: 'reading' });
-     const res = await api.get('/api/v1/books?status=reading').expect(200);
-     expect(res.body.data).toHaveLength(2);
-     expect(res.body.data.every((b) => b.status === 'reading')).toBe(true);
-   });
-   ```
-3. Run `npm test` → **RED** (`expected 3 to have length 2`). Commit: `test(books): add status filter test (failing)`.
-4. Add `listQuerySchema` + `validate({ query })` + pass `filter` to `repo.findAll`.
-5. Run `npm test` → **GREEN**. Commit: `feat(books): filter list by status`.
+| Commit | State |
+|---|---|
+| `feat(books): create + list` | List endpoint ignores `?status=` |
+| `test(books): add status filter test (failing)` | `test_list_filters_by_status` fails: `AssertionError: assert 3 == 2` |
+| `feat(books): filter list by status` | `list_query()` dependency + `service.list(status)`. All green |
 
-Backup red→green candidate if needed: the "400 invalid status on create" test before adding the enum to the Zod schema.
+The test:
+
+```python
+def test_list_filters_by_status(client: TestClient, add_book: AddBook) -> None:
+    add_book("A", status="reading")
+    add_book("B", status="done")
+    add_book("C", status="reading")
+    res = client.get(f"{URL}?status=reading")
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert len(data) == 2
+    assert all(b["status"] == "reading" for b in data)
+```
+
+Replaying it on screen is described in `README.md`.
 
 ---
 
 ## 9. Build order (session checklist)
 
-1. `npm init -y`, install deps, `tsconfig.json` (strict, `module: NodeNext`, `outDir: dist`), `vitest.config.ts`, `.env.example`, `.gitignore`.
-2. `config/env.ts` (Zod), `lib/logger.ts`, `lib/httpError.ts`.
-3. `db/connection.ts`, `db/migrate.ts`.
-4. `modules/books/book.schema.ts` + `book.types.ts` (copy `BookStatus`/`Book` exactly from §2.2).
-5. `book.repository.ts` (SQLite, prepared statements).
-6. `middleware/*` (requestId, requireJson, validate, rateLimit, notFound, errorHandler).
-7. `app.ts` (`createApp(deps)`), `index.ts` (bootstrap).
-8. `book.service.ts`, `book.controller.ts`, `book.routes.ts` — create + list first (no filter).
-9. `tests/helpers/testApp.ts`, `books.create.test.ts`, `books.list.test.ts` → run red→green script (§8.1).
-10. `stats`, `PATCH /:id` + their tests.
-11. `security.test.ts`; verify helmet headers with `curl -I`.
-12. `npm run typecheck && npm test && npm audit`.
-13. Smoke with curl (see §10), then hand off to frontend session.
+1. `uv venv --python 3.12`, `pyproject.toml`, deps, `.env.example`, `.gitignore`. ✅
+2. `core/config.py`, `core/logging.py`, `core/errors.py`. ✅
+3. `db/connection.py`, `db/migrate.py`. ✅
+4. `modules/books/schemas.py` (types copied from §2.2). ✅
+5. `repository.py`. ✅
+6. `middleware/` (core, rate_limit, body_guard). ✅
+7. `main.py` (`create_app`), `__main__.py`. ✅
+8. `service.py`, `router.py`: create + list first, no filter. ✅
+9. `conftest.py`, create + list tests, then the red → green script (§8.1). ✅
+10. Stats and `PATCH /{book_id}` with their tests. ✅
+11. `test_security.py`. Verify headers with `curl -I`. ✅
+12. `ruff check`, `ruff format`, `mypy`, `pytest`, `pip-audit`. ✅
+13. Curl smoke (§10), then hand off to the frontend session. ✅
 
 ---
 
 ## 10. Manual smoke (curl)
 
 ```bash
-curl -s localhost:4000/api/v1/health
-curl -s -X POST localhost:4000/api/v1/books -H 'Content-Type: application/json' -d '{"title":"Dune","author":"Frank Herbert"}'
-curl -s 'localhost:4000/api/v1/books?status=to-read'
-curl -s localhost:4000/api/v1/books/stats
-curl -s -X PATCH localhost:4000/api/v1/books/<id> -H 'Content-Type: application/json' -d '{"status":"reading"}'
-curl -s -X POST localhost:4000/api/v1/books -H 'Content-Type: application/json' -d '{"title":"","status":"nope"}'   # 400
-curl -s -X POST localhost:4000/api/v1/books -d 'title=x'                                                           # 415
-for i in $(seq 1 25); do curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:4000/api/v1/books -H 'Content-Type: application/json' -d '{"title":"x"}'; done | sort | uniq -c   # expect some 429
-curl -sI localhost:4000/api/v1/health | grep -iE 'x-powered-by|content-security-policy|x-content-type-options|ratelimit'
+uv run python -m app &
+B=localhost:4000/api/v1
+curl -s $B/health
+curl -s -X POST $B/books -H 'Content-Type: application/json' -d '{"title":"Dune","author":"Frank Herbert"}'
+curl -s "$B/books?status=to-read"
+curl -s $B/books/stats
+curl -s -X PATCH $B/books/<id> -H 'Content-Type: application/json' -d '{"status":"reading"}'
+curl -s -X POST $B/books -H 'Content-Type: application/json' -d '{"title":"","status":"nope"}'   # 400
+curl -s -X POST $B/books -d 'title=x'                                                            # 415
+for i in $(seq 1 25); do curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/books -H 'Content-Type: application/json' -d '{"title":"x"}'; done | sort | uniq -c   # some 429
+curl -sI $B/health | grep -iE 'server|content-security-policy|x-content-type-options|ratelimit|x-request-id'
 ```
 
 ---
 
 ## 11. Definition of done
 
-- [ ] All endpoints in §2.4 return exactly the envelope in §2.3.
-- [ ] Validation rules in §2.4 enforced; DB `CHECK` constraints present.
-- [ ] `helmet`, CORS allowlist, body limit, `x-powered-by` off.
-- [ ] Global + write rate limiters with standard headers and `Retry-After`.
-- [ ] Structured logs with request id; 429/400 at `warn`, 500 at `error`.
-- [ ] `npm test` green; red→green commit history for the filter test.
-- [ ] `npm audit --audit-level=high` clean.
-- [ ] `.env.example` complete; `README` snippet: install, run, test, env.
-- [ ] Frontend session can run `npm run dev` here and hit every endpoint via Vite proxy with zero changes.
+- [x] All endpoints in §2.4 return exactly the envelope in §2.3.
+- [x] Validation rules in §2.4 enforced. DB `CHECK` constraints present.
+- [x] Security headers, CORS allowlist, body limit, no server banner, docs off in prod.
+- [x] Global + write rate limiters with `RateLimit-*` headers and `Retry-After`.
+- [x] Structured logs with request id. 4xx abuse signals at `warning`, 500 at `error`.
+- [x] `uv run pytest` green. Red → green commit history for the filter test.
+- [x] `uv run pip-audit` clean. ruff and mypy `--strict` clean.
+- [x] `.env.example` complete. `README.md` covers install, run, test and env.
+- [ ] Frontend session runs against this server via the Vite proxy with zero backend changes. Pending the frontend build.
