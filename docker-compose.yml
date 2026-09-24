@@ -1,0 +1,28 @@
+# Start:      docker compose up --build             → http://localhost:8080
+# Tests:      docker compose --profile test run --rm api-test
+#             docker compose --profile test run --rm ui-test
+# Reset DB:   docker compose down -v
+
+services:
+  app:
+    build: { context: ., target: runtime }
+    environment:
+      APP_ENV: ${APP_ENV:-development}           # development → Swagger at http://localhost:8080/docs
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      RATE_LIMIT_DISABLED: ${RATE_LIMIT_DISABLED:-false}
+    ports:
+      - "8080:8080"
+    volumes:
+      - books-data:/data
+    restart: unless-stopped
+
+  api-test:
+    profiles: ["test"]
+    build: { context: ., target: api-test }
+
+  ui-test:
+    profiles: ["test"]
+    build: { context: ., target: ui-test }
+
+volumes:
+  books-data:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from app.core.errors import HttpError
 
@@ -17,15 +17,22 @@ def get_service(request: Request) -> BookService:
     return service
 
 
-def list_query(status: str | None = None) -> BookStatus | None:
-    """Validate ?status=. Unknown query params are ignored (contract 2.4)."""
-    if status is None:
+def _query_error(message: str) -> HttpError:
+    return HttpError(400, "VALIDATION_ERROR", "Invalid query parameters", [{"path": "status", "message": message}])
+
+
+def list_query(status: Annotated[list[str] | None, Query()] = None) -> BookStatus | None:
+    """Validate ?status=. Unknown query params are ignored (contract 2.4).
+
+    Taken as a list so a repeated ?status= is checked in full instead of silently keeping the last value.
+    """
+    if not status:
         return None
-    if status not in BOOK_STATUSES:
-        raise HttpError(
-            400, "VALIDATION_ERROR", "Invalid query parameters", [{"path": "status", "message": STATUS_MESSAGE}]
-        )
-    return status  # type: ignore[return-value]
+    if any(s not in BOOK_STATUSES for s in status):
+        raise _query_error(STATUS_MESSAGE)
+    if len(set(status)) > 1:
+        raise _query_error("Status must be given once")
+    return status[0]  # type: ignore[return-value]
 
 
 Service = Annotated[BookService, Depends(get_service)]

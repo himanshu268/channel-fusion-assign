@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Literal, TypedDict, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -13,7 +14,9 @@ BOOK_STATUSES: tuple[str, ...] = get_args(BookStatus)
 STATUS_MESSAGE = f"Status must be one of: {', '.join(BOOK_STATUSES)}"
 MAX_LEN = 200
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+# C0 + DEL + C1 controls, line/paragraph separators, bidi marks/overrides/isolates, zero-width space, BOM.
+# ZWJ/ZWNJ (U+200C/D) are kept: they are meaningful inside emoji sequences and Indic/Arabic scripts.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c\ufeff]")
 
 
 class Book(TypedDict):
@@ -29,7 +32,11 @@ BookStats = TypedDict("BookStats", {"to-read": int, "reading": int, "done": int,
 
 
 def _clean(value: str) -> str:
-    return _CONTROL_CHARS.sub("", value).strip()
+    cleaned = _CONTROL_CHARS.sub("", value).strip()
+    # only invisible format chars left (e.g. a lone ZWJ) -> treat as empty so "required" still applies
+    if all(unicodedata.category(ch) == "Cf" or ch.isspace() for ch in cleaned):
+        return ""
+    return cleaned
 
 
 def parse_status(value: Any) -> BookStatus:

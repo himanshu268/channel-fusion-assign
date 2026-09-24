@@ -7,7 +7,6 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
@@ -18,6 +17,7 @@ from app.db.connection import open_db
 from app.db.migrate import migrate
 from app.middleware.body_guard import BodyGuardMiddleware
 from app.middleware.core import CoreMiddleware
+from app.middleware.cors import JsonCORSMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.modules.books.repository import SqliteBookRepository
 from app.modules.books.router import router as books_router
@@ -84,15 +84,19 @@ def create_app(
         docs_url="/docs" if docs else None,
         redoc_url=None,
         openapi_url="/openapi.json" if docs else None,
+        redirect_slashes=False,  # "/books/" -> JSON 404, not a bare 307 (which can also downgrade to http behind TLS)
     )
     app.state.settings = settings
     app.state.book_service = BookService(SqliteBookRepository(conn), clock)
 
     register_error_handlers(app)
 
-    @app.api_route(f"{API_PREFIX}/health", methods=["GET", "HEAD"], tags=["health"])
     def health() -> dict[str, Any]:
         return {"data": {"status": "ok"}}
+
+    # Separate HEAD route kept out of the schema, else GET+HEAD share one (duplicate) operationId.
+    app.add_api_route(f"{API_PREFIX}/health", health, methods=["GET"], tags=["health"])
+    app.add_api_route(f"{API_PREFIX}/health", health, methods=["HEAD"], include_in_schema=False)
 
     app.include_router(books_router, prefix=API_PREFIX)
 
@@ -101,7 +105,7 @@ def create_app(
     app.add_middleware(BodyGuardMiddleware, limit=settings.body_limit_bytes)
     app.add_middleware(RateLimitMiddleware, settings=settings)
     app.add_middleware(
-        CORSMiddleware,
+        JsonCORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_methods=["GET", "POST", "PATCH"],
         allow_headers=["Content-Type", "X-Request-Id"],

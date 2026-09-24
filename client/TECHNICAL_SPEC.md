@@ -100,13 +100,16 @@ Validation rules (identical client + server):
 - `author`: optional, string, trimmed, length ≤ 200.
 - `status`: optional on create (default `to-read`), required on PATCH; must be one of the three literals.
 - Unknown body fields → **rejected** (`400`), Zod `.strict()`.
+- `?status=` repeated: every value must be valid and all values the same, else `400` (`Status must be given once` when they conflict).
+- Text cleaning (title, author): trim; strip C0/C1 control chars, U+2028/2029, bidi marks/overrides/isolates, zero-width space, BOM. ZWJ/ZWNJ kept inside text. Invisible-only input counts as empty.
+- Trailing slash (`/api/v1/books/`) → `404 NOT_FOUND` JSON, never a redirect.
 - Unknown query params → ignored.
 
 ### 2.5 Rate limiting (visible to the frontend)
 
 | Limiter | Scope | Default | Env |
 |---|---|---|---|
-| Global | all `/api/*`, per IP | 100 req / 15 min | `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX` |
+| Global | all `/api/*` except `/api/v1/health`, per IP | 100 req / 15 min | `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX` |
 | Write | `POST`, `PATCH` under `/api/*`, per IP | 20 req / 1 min | `WRITE_RATE_LIMIT_WINDOW_MS`, `WRITE_RATE_LIMIT_MAX` |
 
 On every response: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (IETF RateLimit header fields, draft-06 naming; `RateLimit-Reset` = seconds until window resets).

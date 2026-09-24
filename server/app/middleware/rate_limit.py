@@ -21,6 +21,8 @@ from app.core.config import Settings
 from app.core.errors import error_response
 
 WRITE_METHODS = frozenset({"POST", "PATCH"})
+# Liveness probes from LBs/orchestrators must never be throttled into a false "unhealthy".
+EXEMPT_PATHS = frozenset({"/api/v1/health"})
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         ip = client_ip(request, self.trust_proxy)
         request.state.client_ip = ip
-        if self.disabled or not request.url.path.startswith("/api") or request.method == "OPTIONS":
+        path = request.url.path
+        if self.disabled or not path.startswith("/api") or path in EXEMPT_PATHS or request.method == "OPTIONS":
             return await call_next(request)
 
         result = self.global_limiter.hit(ip)

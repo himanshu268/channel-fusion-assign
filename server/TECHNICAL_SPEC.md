@@ -105,13 +105,16 @@ Validation rules (identical client + server):
 - `author`: optional, string, trimmed, length ≤ 200.
 - `status`: optional on create (default `to-read`), required on PATCH; must be one of the three literals.
 - Unknown body fields → **rejected** (`400`), Zod `.strict()`.
+- `?status=` repeated: every value must be valid and all values the same, else `400` (`Status must be given once` when they conflict).
+- Text cleaning (title, author): trim; strip C0/C1 control chars, U+2028/2029, bidi marks/overrides/isolates, zero-width space, BOM. ZWJ/ZWNJ kept inside text. Invisible-only input counts as empty.
+- Trailing slash (`/api/v1/books/`) → `404 NOT_FOUND` JSON, never a redirect.
 - Unknown query params → ignored.
 
 ### 2.5 Rate limiting (visible to the frontend)
 
 | Limiter | Scope | Default | Env |
 |---|---|---|---|
-| Global | all `/api/*`, per IP | 100 req / 15 min | `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX` |
+| Global | all `/api/*` except `/api/v1/health`, per IP | 100 req / 15 min | `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX` |
 | Write | `POST`, `PATCH` under `/api/*`, per IP | 20 req / 1 min | `WRITE_RATE_LIMIT_WINDOW_MS`, `WRITE_RATE_LIMIT_MAX` |
 
 On every response: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (IETF RateLimit header fields, draft-06 naming; `RateLimit-Reset` = seconds until window resets).
@@ -170,6 +173,7 @@ server/
 │   │   └── migrate.py         # idempotent CREATE TABLE IF NOT EXISTS + indexes
 │   ├── middleware/
 │   │   ├── core.py            # request id, security headers, Cache-Control, 500 boundary, access log
+│   │   ├── cors.py            # JsonCORSMiddleware: rejected preflight → JSON envelope, not text/plain
 │   │   ├── rate_limit.py      # FixedWindowLimiter, client_ip(), RateLimitMiddleware (global + write)
 │   │   └── body_guard.py      # pure ASGI: 415 non-JSON body, 413 oversized body (incl. chunked)
 │   └── modules/books/
@@ -183,7 +187,9 @@ server/
     ├── test_books_list.py     # contains the scripted red → green test
     ├── test_books_stats.py
     ├── test_books_update.py
-    └── test_security.py       # headers, CORS, 404/413/415/500 envelopes, rate limits, docs off in prod
+    ├── test_security.py       # headers, CORS, 404/413/415/500 envelopes, rate limits, docs off in prod
+    ├── test_validation_edge_cases.py  # boundaries, types, unicode hardening, media types, size limit, PATCH ids
+    └── test_contract_and_limits.py    # envelope on every path, CORS, rate-limit interplay, config, concurrency
 ```
 
 ### 3.1 Dependencies
@@ -265,11 +271,11 @@ All SQL uses `?` placeholders. **Never** interpolate values into SQL strings.
 
 ```
 CoreMiddleware        request id (validated), try/except → 500 envelope, security headers, access log
-→ CORSMiddleware      allowlist, GET/POST/PATCH, exposes RateLimit-*/Retry-After/X-Request-Id
+→ JsonCORSMiddleware  allowlist, GET/POST/PATCH, exposes RateLimit-*/Retry-After/X-Request-Id; rejected preflight → 400 JSON
 → RateLimitMiddleware /api/* only, skips OPTIONS. Global limiter, then write limiter for POST/PATCH
 → BodyGuardMiddleware 415 if a body is present and not application/json. 413 if > JSON_BODY_LIMIT
 → routes
-     GET   /api/v1/health          (GET + HEAD)
+     GET   /api/v1/health          (GET + HEAD, HEAD hidden from OpenAPI; exempt from rate limiting)
      GET   /api/v1/books/stats     registered before /{book_id}
      GET   /api/v1/books           list_query() dependency validates ?status=
      POST  /api/v1/books           body: CreateBookIn
@@ -288,7 +294,8 @@ Starlette's `add_middleware` makes the last-added middleware the outermost, so `
 | … with `extra_forbidden` | detail message `Unknown field` |
 | … body missing / not an object | detail message `Request body is required` / `Request body must be a JSON object` |
 | Invalid `?status=` | `400 VALIDATION_ERROR`, message `Invalid query parameters` |
-| Starlette 404 / 405 | `404 NOT_FOUND`, message `Route not found` (never HTML) |
+| Starlette 404 / 405 | `404 NOT_FOUND`, message `Route not found` (never HTML). `redirect_slashes=False`, so a trailing slash is a 404 too |
+| Rejected CORS preflight | `400 VALIDATION_ERROR`, message `Disallowed CORS origin` / `method` / `headers` |
 | Oversized body | `413 PAYLOAD_TOO_LARGE` (from BodyGuard) |
 | Any other exception | `500 INTERNAL_ERROR`, `Something went wrong`. Traceback logged server-side with request id, never sent |
 
@@ -302,7 +309,7 @@ Custom field messages (`Title is required`, `Status must be one of: to-read, rea
 |---|---|---|---|
 | A01 | Broken Access Control | No auth in scope (single-user assignment), documented. CORS allowlist. Only `GET/POST/PATCH` exposed, others → 404. `TRUST_PROXY` off by default, so `X-Forwarded-For` cannot spoof the client IP. | `main.py`, `rate_limit.py` |
 | A02 | Cryptographic Failures | No secrets or PII stored. HSTS header (effective over TLS). `.env` gitignored. TLS terminated at a reverse proxy in prod. | `core.py`, `.gitignore` |
-| A03 | Injection | Pydantic validation (types, lengths, enum). Parameterised SQL only. Control characters stripped. JSON-only responses, no templating. Tested with SQL-injection strings in body, query and path. | `schemas.py`, `repository.py` |
+| A03 | Injection | Pydantic validation (types, lengths, enum). Parameterised SQL only. Control, bidi and zero-width characters stripped. JSON-only responses, no templating. Tested with SQL-injection strings in body, query and path. | `schemas.py`, `repository.py` |
 | A04 | Insecure Design | Global + stricter write rate limits. Body cap `10kb`, enforced for chunked bodies too. Server-generated UUIDs. Enum allowlist. Fail-fast config. | `rate_limit.py`, `body_guard.py` |
 | A05 | Security Misconfiguration | Helmet-equivalent headers: CSP `default-src 'none'`, `nosniff`, `X-Frame-Options DENY`, `Referrer-Policy no-referrer`, HSTS, COOP/CORP. No `server` banner. `/docs` and `/openapi.json` disabled in production. JSON 404/405. No stack traces. | `core.py`, `main.py`, `__main__.py` |
 | A06 | Vulnerable & Outdated Components | `uv.lock` committed. `uv run pip-audit` (clean at time of writing). Minimal dependency set. | `pyproject.toml` |
@@ -338,7 +345,10 @@ Additional hardening: `Cache-Control: no-store` on all responses. ruff `S` (band
 | `test_books_update.py` | status change + `updatedAt` bump, other fields unchanged; 404 unknown UUID; 404 malformed ids; invalid status; missing status; extra fields; no body |
 | `test_security.py` | security headers (incl. on errors), no `server` banner, HEAD health, request id generate / echo / sanitise, JSON 404 for unknown route and method, 413 (plain + chunked), SQL injection stored as text, 500 hides details, CORS allow / deny / exposed headers, docs off in prod, global + write rate limits, XFF ignored, window reset |
 
-Current result: **64 passed**.
+| `test_validation_edge_cases.py` | length boundaries (chars not bytes, after trim); wrong JSON types per field; exact status literals; unicode control/bidi/zero-width stripping, ZWJ kept; 415 for each non-JSON type; body exactly at / over limit; repeated `?status=`; PATCH id forms, no side effects on rejection |
+| `test_contract_and_limits.py` | error envelope on every endpoint and error kind; trailing slash → JSON 404; JSON preflight rejection; timestamps / UUID v4; stats vs list consistency; 429 keeps security + CORS headers; health not rate limited; trusted-proxy XFF; unique OpenAPI operation ids; config fail-fast; 8-thread concurrent writes |
+
+Current result: **214 passed**.
 
 ### 8.1 Scripted red → green (done, visible in git history)
 
