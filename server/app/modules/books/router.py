@@ -4,7 +4,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 
-from .schemas import CreateBookIn, UpdateStatusIn
+from app.core.errors import HttpError
+
+from .schemas import BOOK_STATUSES, STATUS_MESSAGE, BookStatus, CreateBookIn, UpdateStatusIn
 from .service import BookService
 
 router = APIRouter(prefix="/books", tags=["books"])
@@ -15,6 +17,17 @@ def get_service(request: Request) -> BookService:
     return service
 
 
+def list_query(status: str | None = None) -> BookStatus | None:
+    """Validate ?status=. Unknown query params are ignored (contract 2.4)."""
+    if status is None:
+        return None
+    if status not in BOOK_STATUSES:
+        raise HttpError(
+            400, "VALIDATION_ERROR", "Invalid query parameters", [{"path": "status", "message": STATUS_MESSAGE}]
+        )
+    return status  # type: ignore[return-value]
+
+
 # NOTE: /stats is registered before /{book_id} so "stats" is never treated as an id.
 @router.get("/stats")
 def book_stats(service: BookService = Depends(get_service)) -> dict[str, Any]:
@@ -22,8 +35,10 @@ def book_stats(service: BookService = Depends(get_service)) -> dict[str, Any]:
 
 
 @router.get("")
-def list_books(service: BookService = Depends(get_service)) -> dict[str, Any]:
-    return {"data": service.list()}
+def list_books(
+    status: BookStatus | None = Depends(list_query), service: BookService = Depends(get_service)
+) -> dict[str, Any]:
+    return {"data": service.list(status)}
 
 
 @router.post("", status_code=201)

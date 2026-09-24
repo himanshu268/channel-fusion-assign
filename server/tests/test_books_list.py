@@ -32,3 +32,31 @@ def test_list_filters_by_status(client: TestClient, add_book: AddBook) -> None:
     data = res.json()["data"]
     assert len(data) == 2
     assert all(b["status"] == "reading" for b in data)
+
+
+def test_list_filter_each_status(client: TestClient, add_book: AddBook) -> None:
+    for status in ("to-read", "reading", "done", "done"):
+        add_book(status, status=status)
+    for status, expected in (("to-read", 1), ("reading", 1), ("done", 2)):
+        data = client.get(URL, params={"status": status}).json()["data"]
+        assert len(data) == expected
+        assert {b["status"] for b in data} == {status}
+
+
+def test_list_filter_with_no_matches_returns_empty(client: TestClient, add_book: AddBook) -> None:
+    add_book("A", status="reading")
+    assert client.get(URL, params={"status": "done"}).json() == {"data": []}
+
+
+def test_list_rejects_invalid_status_filter(client: TestClient) -> None:
+    for bad in ("finished", "", "READING", "' OR 1=1 --"):
+        res = client.get(URL, params={"status": bad})
+        assert res.status_code == 400, bad
+        err = res.json()["error"]
+        assert err["code"] == "VALIDATION_ERROR"
+        assert err["details"] == [{"path": "status", "message": "Status must be one of: to-read, reading, done"}]
+
+
+def test_list_ignores_unknown_query_params(client: TestClient, add_book: AddBook) -> None:
+    add_book("A")
+    assert len(client.get(URL, params={"foo": "bar"}).json()["data"]) == 1
